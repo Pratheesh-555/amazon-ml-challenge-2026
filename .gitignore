@@ -57,6 +57,7 @@ data/
 output/*
 experiments/*
 !experiments/.gitkeep
+!experiments/results.csv
 
 # Models
 *.pkl
