@@ -1,0 +1,2 @@
+method,sample_size,candidate_recall,avg_candidates,median_candidates,p90_candidates,p95_candidates,p99_candidates,zero_candidate_rate,index_time,query_time
+exact_name,10000,0.2187212246777164,9.5474,1.0,16.0,60.0,166.0,0.2967,52.522467851638794,0.123626708984375
