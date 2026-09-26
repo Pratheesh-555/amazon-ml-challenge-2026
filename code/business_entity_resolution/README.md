@@ -1,65 +1,127 @@
 # Business Entity Resolution Pipeline
 
-This repository contains a modular pipeline for the Amazon ML Challenge 2026. 
+Self-contained pipeline for Amazon ML Challenge 2026 (see **ML 2.pdf** / `student_resource/README.md`).
 
-The pipeline is split into independent stages to strictly control memory usage and maximize reproducibility:
-1. **Preprocessing**: Normalizes names, addresses, and country codes (handling English, French, and Indian scripts) while expanding abbreviations and stripping legal suffixes.
-2. **Blocking (Candidate Generation)**: Reduces the 10M x 1.7M cross-product space into a manageable candidate set using scalable indexers.
-3. **Feature Engineering** *(Upcoming)*: Computes pair-wise similarities (Jaccard, Levenshtein, phonetic) between Source 1 and candidates.
-4. **Matching Model** *(Upcoming)*: A classifier (e.g., LightGBM) to score candidates and pick the final matches using an F0.5 optimized threshold.
+Goal: for every Source 1 entity, find matching Source 2 / Source 3 records. Produce:
+
+- `output/matching_results.tsv` — final matches (Portal / leaderboard)
+- `output/candidate_pairs.tsv` — last candidate set scored by the matcher (required in the final zip)
+
+Stages:
+
+1. **Preprocessing** — normalize names, addresses, and country labels (open set: train has US/India; test also has France). Expand abbreviations, strip legal suffixes. Do not hard-code countries.
+2. **Blocking** — index S2/S3 so each S1 entity gets a small candidate set instead of a full cross-product.
+3. **Matching** — not trained in-repo yet. Current inference (`scripts/baseline_v1.py` at repo root) treats exact-normalized name/address hits as matches.
+4. **Output** — tab-separated TSVs with one row per S1 entity.
 
 ## 1. Setup
 
-Navigate to the `code/business_entity_resolution` directory and install the required dependencies:
+Install from this folder:
 
 ```bash
 cd code/business_entity_resolution
 pip install -r requirements.txt
 ```
 
-*(Note: Data should be placed in `student_resource/dataset/` relative to the repository root, as per the challenge setup).*
+Data is **not** inside this folder. It lives at the repository root:
 
-## 2. Implemented Blocking Algorithms
+```
+../../student_resource/dataset/train/
+../../student_resource/dataset/test/
+```
 
-You can swap between different algorithms to find the best candidate recall vs. memory trade-off:
+All reads/writes use `sep="\t"`, `encoding="utf-8"`.
 
-*   **`exact_name`**: Strict exact matching on the normalized business name. 
-*   **`exact_address`**: Strict exact matching on the normalized address (with 50+ abbreviations expanded).
-*   **`token_name`**: Inverted index on name tokens. Retrieves candidates that share at least *N* tokens. Automatically filters out "stop word" tokens (like "services", "inc") that appear in >100,000 records.
-*   **`hybrid`**: A composite blocker that runs multiple strategies (e.g., Exact Name + Exact Address) and takes the union of their candidates.
+## 2. Blocking methods
 
-## 3. Benchmarking Algorithms
+| `--method` | Behavior |
+| --- | --- |
+| `exact_name` | Exact match on normalized name, partitioned by country |
+| `exact_address` | Exact match on normalized address, partitioned by country |
+| `token_name` | Inverted index on name tokens; keep IDs sharing at least *N* tokens |
+| `hybrid` | Union of exact name + exact address |
 
-To test blocking algorithms and see their Candidate Recall, Average Candidates, and Runtime without generating massive output files, use the benchmark script. It outputs results directly to `experiments/results.csv`.
+## 3. Benchmark blocking on train (labeled)
+
+Ground truth is only in `train_ground_truth.tsv`. Hold out / sample S1 and score **candidate recall** (upper bound on match recall).
+
+Run from the **repository root** (`amazon-ml-challenge-2026/`), not this directory — paths are `student_resource/dataset/...`:
 
 ```bash
-# Run exact_name matching on a subset of 10,000 entities
-python -m src.evaluation.benchmark --method exact_name --sample-size 10000
+# Windows PowerShell
+$env:PYTHONPATH = "code/business_entity_resolution"
+python -m src.evaluation.benchmark --method exact_name --sample-size 10000 --out experiments/results.csv
 
-# Run token overlap blocking
-python -m src.evaluation.benchmark --method token_name --sample-size 10000
-
-# Run a hybrid combination
 python -m src.evaluation.benchmark --method hybrid --sample-size 10000
 ```
 
-## 4. Applying the Model (End-to-End)
-
-*(This component is actively in development as per the engineering plan)*
-
-Once the best hybrid blocker is identified, you will run the full inference script to generate the submission files:
-
 ```bash
-# Coming soon:
-python -m src.inference.generate_candidates --method hybrid --out output/candidate_pairs.tsv
-python -m src.inference.score_matches --candidates output/candidate_pairs.tsv --out output/matching_results.tsv
+# macOS / Linux
+PYTHONPATH=code/business_entity_resolution python -m src.evaluation.benchmark --method hybrid --sample-size 10000
 ```
 
-## 5. Development & Testing
+Metrics go to `experiments/results.csv`. Macro F0.5 for a matcher is in `src/evaluation/metrics.py` (`f05_macro`).
 
-We enforce strict test coverage for normalizers and metric calculators to ensure recall ceilings are accurate.
+## 4. Train a matching model
 
-To run the test suite:
+There is **no** `train.py` yet. When you add one under `src/`, it should:
+
+1. Split train S1 + ground truth into train/validation.
+2. Build candidates with a blocker (`candidate_pairs` = whatever the model will score).
+3. Featurize pairs (string similarity on name/address; country as a free-form label).
+4. Train an **MIT/Apache 2.0** model with **≤ 8B** parameters (sklearn / LightGBM-class models fit this).
+5. Pick a threshold that maximizes **macro F0.5** on validation, including singletons (empty prediction = 1.0 if truth is empty).
+6. Run the same blocker + scorer on **test** and write both output TSVs.
+
+Until that exists, generate leaderboard-shaped matches with the repo-root baseline:
+
 ```bash
+# from amazon-ml-challenge-2026/
+python scripts/baseline_v1.py
+# writes output/matching_results.tsv
+```
+
+Expected `matching_results.tsv` schema:
+
+```
+source1_entity_id	matched_entity_ids
+S1-00001	S2-00047,S2-00193,S3-00812
+S1-00002	S3-00004
+S1-00003	
+```
+
+`candidate_pairs.tsv` uses `source1_entity_id` and `candidate_entity_ids` with the same row/ID rules. Final matches must be a subset of candidates.
+
+## 5. Validate expected output
+
+From `student_resource/`:
+
+```bash
+python utils/validate_submission.py \
+    --matching ../output/matching_results.tsv \
+    --candidate ../output/candidate_pairs.tsv \
+    --test-dir dataset/test
+```
+
+`PASS` means format is safe to upload. It does not compute F0.5.
+
+## 6. Tests
+
+```bash
+cd code/business_entity_resolution
 python -m pytest tests/ -v
 ```
+
+## 7. Reproduce end-to-end (data → blocking → matching → output)
+
+From repository root:
+
+```bash
+pip install -r code/business_entity_resolution/requirements.txt
+python scripts/baseline_v1.py
+python student_resource/utils/validate_submission.py \
+    --matching output/matching_results.tsv \
+    --test-dir student_resource/dataset/test
+```
+
+Upload `output/matching_results.tsv` to the Portal. Include both TSVs plus this `src/` tree in `<team_name>_submission.zip` as specified in ML 2.pdf.
